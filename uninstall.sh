@@ -1,5 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
-echo "[+] Removing Key2Bit..."
 sudo rm -f /usr/local/bin/key2bit
-echo "[+] Removed."
+echo "Key2Bit removed."

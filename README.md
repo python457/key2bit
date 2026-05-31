@@ -1,8 +1,8 @@
-# Key2Bit v2.0
+# Key2Bit v3.0
 
-**Key2Bit** is a Kali Linux friendly CLI utility for cryptographic key generation, classification, weak key scanning, optimization recommendations, benchmarking and report export.
+Key2Bit is a Kali Linux friendly CLI utility for encryption key generation, analysis, classification, weak key scanning, optimization experiments, benchmarking and report export.
 
-License: **Kenobi**
+License: Kenobi
 
 ## Install
 
@@ -12,29 +12,52 @@ cd key2bit
 sudo bash install.sh
 ```
 
-## Commands
+Local zip install:
 
 ```bash
-key2bit
+unzip key2bit_v3.zip
+cd key2bit_v3
+sudo bash install.sh
+```
+
+## Main commands
+
+```bash
 key2bit --version
 key2bit generate --type aes --bits 256
 key2bit generate --type random --length 32
 key2bit analyze --key "A7f9@demoKey2026!"
 key2bit classify --file keys.txt
 key2bit scan --file keys.txt
-key2bit optimize --environment mobile
-key2bit optimize --environment bank --target 384
-key2bit benchmark --rounds 50000
+key2bit optimize --environment bank
+key2bit benchmark --rounds 10000
 key2bit report --file keys.txt --output report.csv --format csv
-key2bit report --file keys.txt --output report.json --format json
-key2bit demo
-key2bit deathstar
 ```
 
-## Purpose
+## Research mode
 
-This project was created as an educational cybersecurity CLI tool for a diploma project about cryptographic key classification and optimization methods.
+Generate dataset:
 
-## Note
+```bash
+key2bit dataset --samples 2048 --output dataset.csv
+```
 
-RSA and ECC generation modes in this version are educational simulations for classification and optimization demonstration. For production cryptography use verified libraries and official standards.
+Run classification experiment:
+
+```bash
+key2bit experiment --samples 2048 --output experiment_results.csv
+```
+
+Optimize dataset scoring:
+
+```bash
+key2bit optimize --dataset dataset.csv
+```
+
+## What was added in v3.0
+
+- Synthetic dataset generation
+- Before/after classification experiment
+- Optimized scoring model based on entropy, diversity and weak-pattern penalty
+- CSV export for experiment results
+- Research-ready terminal outputs for screenshots and diploma tables
