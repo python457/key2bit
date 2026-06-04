@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Key2Bit v3.0
-Cryptographic key generation, classification, experiment and optimization CLI utility.
+Key2Bit v4.0
+Cryptographic key generation, classification, S-AES subkey analysis and optimization CLI utility.
 Licensed Under MIT.
 """
 
@@ -19,8 +19,17 @@ import sys
 import time
 from pathlib import Path
 
-VERSION = "3.0"
+VERSION = "4.0"
 LICENSE = "MIT"
+
+TITLE = r"""
+ ██╗  ██╗███████╗██╗   ██╗██████╗ ██████╗ ██╗████████╗
+ ██║ ██╔╝██╔════╝╚██╗ ██╔╝╚════██╗██╔══██╗██║╚══██╔══╝
+ █████╔╝ █████╗   ╚████╔╝  █████╔╝██████╔╝██║   ██║
+ ██╔═██╗ ██╔══╝    ╚██╔╝  ██╔═══╝ ██╔══██╗██║   ██║
+ ██║  ██╗███████╗   ██║   ███████╗██████╔╝██║   ██║
+ ╚═╝  ╚═╝╚══════╝   ╚═╝   ╚══════╝╚═════╝ ╚═╝   ╚═╝
+"""
 
 DEATH_STAR = r"""
       ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
@@ -40,14 +49,7 @@ DEATH_STAR = r"""
       ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
 """
 
-TITLE = r"""
- ██╗  ██╗███████╗██╗   ██╗██████╗ ██████╗ ██╗████████╗
- ██║ ██╔╝██╔════╝╚██╗ ██╔╝╚════██╗██╔══██╗██║╚══██╔══╝
- █████╔╝ █████╗   ╚████╔╝  █████╔╝██████╔╝██║   ██║
- ██╔═██╗ ██╔══╝    ╚██╔╝  ██╔═══╝ ██╔══██╗██║   ██║
- ██║  ██╗███████╗   ██║   ███████╗██████╔╝██║   ██║
- ╚═╝  ╚═╝╚══════╝   ╚═╝   ╚══════╝╚═════╝ ╚═╝   ╚═╝
-"""
+
 
 WEAK_WORDS = [
     "password", "qwerty", "admin", "root", "letmein", "welcome", "dragon",
@@ -445,8 +447,278 @@ def cmd_report(args):
     print(f"Report saved: {args.output}")
 
 
+
+# -----------------------------
+# Key2Bit v4.0: S-AES module
+# -----------------------------
+SBOX = [0x9, 0x4, 0xA, 0xB, 0xD, 0x1, 0x8, 0x5, 0x6, 0x2, 0x0, 0x3, 0xC, 0xE, 0xF, 0x7]
+INV_SBOX = [0xA, 0x5, 0x9, 0xB, 0x1, 0x7, 0x8, 0xF, 0x6, 0x0, 0x2, 0x3, 0xC, 0x4, 0xD, 0xE]
+
+
+def _clean_bit_or_hex(value: str) -> int:
+    """Accept 16-bit binary or 4-hex-char value and return integer."""
+    v = value.strip().replace(" ", "").replace("_", "")
+    if v.lower().startswith("0b"):
+        v = v[2:]
+    if v.lower().startswith("0x"):
+        v = v[2:]
+    if set(v) <= {"0", "1"} and len(v) == 16:
+        return int(v, 2)
+    if all(c in "0123456789abcdefABCDEF" for c in v) and len(v) == 4:
+        return int(v, 16)
+    raise ValueError("Value must be 16-bit binary or 4 hex chars, for example 1010101010101010 or A3F1")
+
+
+def _bits16(x: int) -> str:
+    return format(x & 0xFFFF, "016b")
+
+
+def _hex4(x: int) -> str:
+    return format(x & 0xFFFF, "04X")
+
+
+def _nibbles(x: int) -> list[int]:
+    return [(x >> 12) & 0xF, (x >> 8) & 0xF, (x >> 4) & 0xF, x & 0xF]
+
+
+def _from_nibbles(n: list[int]) -> int:
+    return ((n[0] & 0xF) << 12) | ((n[1] & 0xF) << 8) | ((n[2] & 0xF) << 4) | (n[3] & 0xF)
+
+
+def _sub_nibbles(x: int, inv: bool = False) -> int:
+    box = INV_SBOX if inv else SBOX
+    return _from_nibbles([box[n] for n in _nibbles(x)])
+
+
+def _shift_rows(x: int) -> int:
+    # state is [n0 n1; n2 n3]. Shift second row left: [n0 n1; n3 n2]
+    n = _nibbles(x)
+    return _from_nibbles([n[0], n[1], n[3], n[2]])
+
+
+def _gf_mul(a: int, b: int) -> int:
+    # GF(2^4), irreducible polynomial x^4 + x + 1 (0b10011)
+    p = 0
+    for _ in range(4):
+        if b & 1:
+            p ^= a
+        carry = a & 0x8
+        a = (a << 1) & 0xF
+        if carry:
+            a ^= 0x3
+        b >>= 1
+    return p & 0xF
+
+
+def _mix_columns(x: int, inv: bool = False) -> int:
+    n = _nibbles(x)
+    if not inv:
+        # matrix [[1,4],[4,1]] applied to columns
+        c0 = n[0] ^ _gf_mul(4, n[2])
+        c1 = n[1] ^ _gf_mul(4, n[3])
+        c2 = _gf_mul(4, n[0]) ^ n[2]
+        c3 = _gf_mul(4, n[1]) ^ n[3]
+    else:
+        # inverse matrix [[9,2],[2,9]]
+        c0 = _gf_mul(9, n[0]) ^ _gf_mul(2, n[2])
+        c1 = _gf_mul(9, n[1]) ^ _gf_mul(2, n[3])
+        c2 = _gf_mul(2, n[0]) ^ _gf_mul(9, n[2])
+        c3 = _gf_mul(2, n[1]) ^ _gf_mul(9, n[3])
+    return _from_nibbles([c0, c1, c2, c3])
+
+
+def _rot_nib(byte: int) -> int:
+    return ((byte & 0xF) << 4) | ((byte >> 4) & 0xF)
+
+
+def _sub_byte(byte: int) -> int:
+    return (SBOX[(byte >> 4) & 0xF] << 4) | SBOX[byte & 0xF]
+
+
+def _key_expansion(master_key: int) -> tuple[int, int, int]:
+    w0 = (master_key >> 8) & 0xFF
+    w1 = master_key & 0xFF
+    w2 = w0 ^ 0x80 ^ _sub_byte(_rot_nib(w1))
+    w3 = w2 ^ w1
+    w4 = w2 ^ 0x30 ^ _sub_byte(_rot_nib(w3))
+    w5 = w4 ^ w3
+    k0 = (w0 << 8) | w1
+    k1 = (w2 << 8) | w3
+    k2 = (w4 << 8) | w5
+    return k0, k1, k2
+
+
+def saes_encrypt_block(plaintext: int, master_key: int) -> tuple[int, dict]:
+    k0, k1, k2 = _key_expansion(master_key)
+    states = {}
+    s = plaintext ^ k0
+    states["add_round_key_0"] = s
+    s = _sub_nibbles(s)
+    states["sub_nibbles_1"] = s
+    s = _shift_rows(s)
+    states["shift_rows_1"] = s
+    s = _mix_columns(s)
+    states["mix_columns_1"] = s
+    s ^= k1
+    states["add_round_key_1"] = s
+    s = _sub_nibbles(s)
+    states["sub_nibbles_2"] = s
+    s = _shift_rows(s)
+    states["shift_rows_2"] = s
+    s ^= k2
+    states["ciphertext"] = s
+    return s, {"k0": k0, "k1": k1, "k2": k2, "states": states}
+
+
+def saes_decrypt_block(ciphertext: int, master_key: int) -> int:
+    k0, k1, k2 = _key_expansion(master_key)
+    s = ciphertext ^ k2
+    s = _shift_rows(s)  # self-inverse
+    s = _sub_nibbles(s, inv=True)
+    s ^= k1
+    s = _mix_columns(s, inv=True)
+    s = _shift_rows(s)
+    s = _sub_nibbles(s, inv=True)
+    s ^= k0
+    return s & 0xFFFF
+
+
+def bit_balance(bitstr: str) -> tuple[int, int, float]:
+    ones = bitstr.count("1")
+    zeros = bitstr.count("0")
+    total = len(bitstr) or 1
+    return zeros, ones, round(abs(ones - zeros) / total, 3)
+
+
+def bit_entropy(bitstr: str) -> float:
+    if not bitstr:
+        return 0.0
+    zeros = bitstr.count("0") / len(bitstr)
+    ones = bitstr.count("1") / len(bitstr)
+    h = 0.0
+    for p in (zeros, ones):
+        if p > 0:
+            h -= p * math.log2(p)
+    return round(h, 3)
+
+
+def classify_segment(bits: str) -> str:
+    h = bit_entropy(bits)
+    _, _, imbalance = bit_balance(bits)
+    if h >= 0.95 and imbalance <= 0.25:
+        return "STRONG"
+    if h >= 0.75 and imbalance <= 0.5:
+        return "MEDIUM"
+    return "WEAK"
+
+
+def segment_key_bits(bitstr: str, block: int = 16) -> list[str]:
+    return [bitstr[i:i+block] for i in range(0, len(bitstr), block) if bitstr[i:i+block]]
+
+
+def saes_quality(master_key: int) -> dict:
+    k0, k1, k2 = _key_expansion(master_key)
+    rows = []
+    for name, val in [("K1", k0), ("K2", k1), ("K3", k2)]:
+        bits = _bits16(val)
+        zeros, ones, imbalance = bit_balance(bits)
+        entropy = bit_entropy(bits)
+        level = classify_segment(bits)
+        rows.append({"subkey": name, "hex": _hex4(val), "bits": bits, "zeros": zeros, "ones": ones, "entropy": entropy, "imbalance": imbalance, "level": level})
+    avg_entropy = round(sum(r["entropy"] for r in rows) / len(rows), 3)
+    weak_count = sum(1 for r in rows if r["level"] == "WEAK")
+    score = int(max(0, min(100, round(avg_entropy * 100 - weak_count * 15))))
+    if score < 50:
+        key_level = "WEAK"
+    elif score < 75:
+        key_level = "MEDIUM"
+    elif score < 90:
+        key_level = "STRONG"
+    else:
+        key_level = "VERY_STRONG"
+    rec = "Key structure is acceptable."
+    if weak_count:
+        rec = "Weak subkey detected. Regenerate master key or choose a key with better bit balance."
+    elif avg_entropy < 0.9:
+        rec = "Average entropy is not high. New random master key is recommended."
+    return {"rows": rows, "avg_entropy": avg_entropy, "score": score, "level": key_level, "recommendation": rec}
+
+
+def cmd_segment(args):
+    raw = args.key.strip().replace(" ", "")
+    if all(c in "01" for c in raw):
+        bits = raw
+    elif all(c in "0123456789abcdefABCDEF" for c in raw):
+        bits = bin(int(raw, 16))[2:].zfill(len(raw)*4)
+    else:
+        raise ValueError("Use binary or hexadecimal key value.")
+    rows = []
+    for i, seg in enumerate(segment_key_bits(bits, args.block), 1):
+        z, o, imb = bit_balance(seg)
+        rows.append({"segment": f"K{i}", "bits": seg, "zeros": z, "ones": o, "entropy": bit_entropy(seg), "level": classify_segment(seg)})
+    print(f"[+] Segment analysis | total_bits={len(bits)} | block={args.block}")
+    print_table(rows, ["segment", "bits", "zeros", "ones", "entropy", "level"])
+
+
+def cmd_saes(args):
+    pt = _clean_bit_or_hex(args.plaintext)
+    key = _clean_bit_or_hex(args.key)
+    ct, info = saes_encrypt_block(pt, key)
+    recovered = saes_decrypt_block(ct, key)
+    q = saes_quality(key)
+
+    print("[+] S-AES encryption/decryption test")
+    print(f"Plaintext            : {_bits16(pt)}  (0x{_hex4(pt)})")
+    print(f"Master key           : {_bits16(key)}  (0x{_hex4(key)})")
+    print("\n[+] Key expansion")
+    print(f"K1                   : {_bits16(info['k0'])}  (0x{_hex4(info['k0'])})")
+    print(f"K2                   : {_bits16(info['k1'])}  (0x{_hex4(info['k1'])})")
+    print(f"K3                   : {_bits16(info['k2'])}  (0x{_hex4(info['k2'])})")
+    print("\n[+] Encryption rounds")
+    for name, value in info["states"].items():
+        print(f"{name:22}: {_bits16(value)}  (0x{_hex4(value)})")
+    print("\n[+] Decryption comparison")
+    print(f"Ciphertext           : {_bits16(ct)}  (0x{_hex4(ct)})")
+    print(f"Recovered plaintext  : {_bits16(recovered)}  (0x{_hex4(recovered)})")
+    print(f"Match result         : {'SUCCESS' if recovered == pt else 'FAILED'}")
+    print("\n[+] Subkey classification")
+    print_table(q["rows"], ["subkey", "hex", "zeros", "ones", "entropy", "imbalance", "level"])
+    print("\n[+] Optimization recommendation")
+    print(f"Average entropy      : {q['avg_entropy']}")
+    print(f"Key quality score    : {q['score']}")
+    print(f"Key quality level    : {q['level']}")
+    print(f"Recommendation       : {q['recommendation']}")
+
+
+def cmd_saes_compare(args):
+    pt = _clean_bit_or_hex(args.plaintext)
+    if args.keys_file:
+        candidates = read_keys_from_file(args.keys_file)
+    else:
+        candidates = [x.strip() for x in args.keys.split(",") if x.strip()]
+    rows = []
+    for i, kstr in enumerate(candidates, 1):
+        try:
+            key = _clean_bit_or_hex(kstr)
+            ct, _ = saes_encrypt_block(pt, key)
+            rec = saes_decrypt_block(ct, key)
+            q = saes_quality(key)
+            rows.append({"id": f"Key{i}", "key_hex": _hex4(key), "cipher_hex": _hex4(ct), "match": "OK" if rec == pt else "FAIL", "avg_entropy": q["avg_entropy"], "score": q["score"], "level": q["level"]})
+        except Exception as e:
+            rows.append({"id": f"Key{i}", "key_hex": kstr[:16], "cipher_hex": "-", "match": "ERROR", "avg_entropy": "-", "score": 0, "level": str(e)[:16]})
+    print("[+] S-AES key comparison")
+    print(f"Plaintext            : {_bits16(pt)}  (0x{_hex4(pt)})")
+    print_table(rows, ["id", "key_hex", "cipher_hex", "match", "avg_entropy", "score", "level"])
+    valid = [r for r in rows if isinstance(r.get("score"), int) and r.get("match") == "OK"]
+    if valid:
+        best = max(valid, key=lambda r: r["score"])
+        print("\n[+] Optimization result")
+        print(f"Recommended key      : {best['id']} | 0x{best['key_hex']}")
+        print(f"Reason               : highest subkey entropy and classification score")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Key2Bit v3.0 - Encryption key classification and optimization utility")
+    parser = argparse.ArgumentParser(description="Key2Bit v4.0 - Encryption key classification, S-AES analysis and optimization utility")
     parser.add_argument("--version", action="version", version=f"Key2Bit v{VERSION} | License: {LICENSE}")
     sub = parser.add_subparsers(dest="cmd")
 
@@ -492,6 +764,23 @@ def main():
     p.add_argument("--output", required=True)
     p.add_argument("--format", choices=["csv", "json"], default="csv")
     p.set_defaults(func=cmd_report)
+
+
+    p = sub.add_parser("segment", help="Split binary/hex key into K1..Kn segments and classify each part")
+    p.add_argument("--key", required=True)
+    p.add_argument("--block", type=int, default=16)
+    p.set_defaults(func=cmd_segment)
+
+    p = sub.add_parser("saes", help="Run S-AES encryption/decryption and K1/K2/K3 subkey analysis")
+    p.add_argument("--plaintext", required=True, help="16-bit binary or 4 hex chars")
+    p.add_argument("--key", required=True, help="16-bit binary or 4 hex chars")
+    p.set_defaults(func=cmd_saes)
+
+    p = sub.add_parser("saes-compare", help="Compare several S-AES keys and recommend the best one")
+    p.add_argument("--plaintext", required=True, help="16-bit binary or 4 hex chars")
+    p.add_argument("--keys", default="", help="Comma-separated 16-bit binary or 4-hex keys")
+    p.add_argument("--keys-file", default=None)
+    p.set_defaults(func=cmd_saes_compare)
 
     p = sub.add_parser("deathstar", help="Show console banner")
     p.set_defaults(func=lambda args: print(DEATH_STAR + TITLE + f"Key2Bit v{VERSION} | Licensed Under {LICENSE}"))
